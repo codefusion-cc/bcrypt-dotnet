@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Unit and property tests. Run from the repository root: dotnet test -->
+  <PropertyGroup>
+    <TargetFrameworks>$(BcryptFrameworks)</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '11.0'))">$(TargetFrameworks);net11.0</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>CodeFusion.Security.Tests</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <IsPackable>false</IsPackable>
+    <!-- Test names are sentences, and the queue tests hold ValueTasks on purpose to check how they behave. -->
+    <NoWarn>$(NoWarn);CA1707;CA1515;CA2007;CA1861;CA2012</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="FsCheck.Xunit.v3" />
+    <!-- An independent bcrypt to check ours against. -->
+    <PackageReference Include="BCrypt.Net-Next" />
+    <ProjectReference Include="../../src/CodeFusion.Security.Bcrypt/CodeFusion.Security.Bcrypt.csproj" />
+  </ItemGroup>
+
+</Project>

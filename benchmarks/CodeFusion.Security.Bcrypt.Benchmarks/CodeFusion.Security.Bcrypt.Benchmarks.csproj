@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- BenchmarkDotNet; the README says how to run it. -->
+  <PropertyGroup>
+    <TargetFrameworks>$(BcryptFrameworks)</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '11.0'))">$(TargetFrameworks);net11.0</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>CodeFusion.Security.Benchmarks</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);CA1001;CA1515;CA1822;CA2007;CA2012</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+    <PackageReference Include="BCrypt.Net-Next" />
+    <ProjectReference Include="../../src/CodeFusion.Security.Bcrypt/CodeFusion.Security.Bcrypt.csproj" />
+  </ItemGroup>
+
+</Project>
