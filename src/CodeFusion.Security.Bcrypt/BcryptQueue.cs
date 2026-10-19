@@ -455,7 +455,7 @@ public sealed unsafe class BcryptQueue : IDisposable
         {
             var r = Batch[i]!;
             Batch[i] = null;
-            if (r.Stored is { } stored) r.Complete(Bcrypt.Matches(Ct + 6 * i, stored.AsSpan(stored.Length - 31)), null, null);
+            if (r.Stored is { } stored) r.Complete(Bcrypt.Matches(Ct + 6 * i, stored.AsSpan(stored.Length - Bcrypt.HashChars)), null, null);
             else r.Complete(false, Bcrypt.Format(Inputs + i, Ct + 6 * i), null);
         }
     }

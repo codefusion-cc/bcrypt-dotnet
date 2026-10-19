@@ -17,7 +17,8 @@ public static unsafe partial class Bcrypt
 {
     internal const int SaltBytes = 16;
     internal const int HashBytes = 23; // OpenBSD encodes 23 of the 24 ciphertext bytes
-    const int SaltChars = 22, HashChars = 31;
+    internal const int HashChars = 31;
+    const int SaltChars = 22;
 
     // One lane's state: S-boxes at 0, P at 1024; lane k starts at k * Lane. Offsets are constants, so the JIT folds
     // them into the addressing and every lane shares one base register.

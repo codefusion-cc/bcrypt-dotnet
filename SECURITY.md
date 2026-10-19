@@ -28,5 +28,7 @@ Fixes go into the latest release only.
 - Check a hash even when the account doesn't exist (against a fixed dummy hash), so response times don't reveal
   which accounts exist.
 - Use a cost of at least 10; raise it over time and use `PasswordNeedsRehash` to upgrade hashes at sign-in.
+- Check only hashes you made or imported deliberately. A hash's cost decides the work: a cost-31 hash takes days to
+  check. When hashes come from elsewhere, read the cost with `InterrogateHash` first and refuse ones above your limit.
 - Limit sign-in attempts. With `BcryptQueue`, set `MaxQueued` so a flood of sign-ins is refused quickly instead of
   queueing minutes of work.
