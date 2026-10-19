@@ -12,13 +12,13 @@
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
 
     <PackageId>CodeFusion.Security.Bcrypt</PackageId>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <Authors>Krystian Pawłow</Authors>
     <Company>CodeFusion</Company>
     <Copyright>Copyright (c) 2026 Krystian Pawłow</Copyright>
     <Description>Fast, allocation-free bcrypt for .NET: up to five hashes interleaved per thread, a batching queue for servers, and BCrypt.Net-Next compatible hashes.</Description>
     <PackageTags>bcrypt;password;hashing;security;blowfish;crypt</PackageTags>
-    <PackageLicenseExpression>MIT AND BSD-3-Clause</PackageLicenseExpression>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/codefusion-cc/bcrypt-dotnet</PackageProjectUrl>
     <RepositoryUrl>https://github.com/codefusion-cc/bcrypt-dotnet</RepositoryUrl>
@@ -30,13 +30,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Writes Bcrypt.Lanes.g.cs, the lane loops, at compile time. Build-time only: the package doesn't depend on it. -->
+    <!-- Writes the lane loops and the Blowfish tables (computed from pi) at compile time. Build-time only: the package
+         doesn't depend on it. -->
     <ProjectReference Include="../CodeFusion.Security.Bcrypt.Generators/CodeFusion.Security.Bcrypt.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" PrivateAssets="all" />
     <InternalsVisibleTo Include="CodeFusion.Security.Bcrypt.Tests" />
     <InternalsVisibleTo Include="CodeFusion.Security.Bcrypt.Benchmarks" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
     <None Include="../../LICENSE" Pack="true" PackagePath="/" />
-    <None Include="../../THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
 </Project>

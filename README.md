@@ -244,5 +244,5 @@ BCrypt.Net-Next, the queue's cancellation, limits and pooling, and that a check 
 
 ## License
 
-MIT. `BlowfishConstants.cs` is BSD-3-Clause, from Go's `golang.org/x/crypto`; see
-[THIRD-PARTY-NOTICES.md](https://github.com/codefusion-cc/bcrypt-dotnet/blob/main/THIRD-PARTY-NOTICES.md).
+MIT. Blowfish's initial tables, the hexadecimal digits of pi, are computed at compile time by
+[BlowfishTablesGenerator.cs](https://github.com/codefusion-cc/bcrypt-dotnet/blob/main/src/CodeFusion.Security.Bcrypt.Generators/BlowfishTablesGenerator.cs).

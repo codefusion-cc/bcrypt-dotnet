@@ -10,6 +10,18 @@ namespace CodeFusion.Security.Tests;
 /// </summary>
 public class TestVectorTests
 {
+    /// <summary>The tables the generator computes are pi's hex digits, as Schneier published them for Blowfish.</summary>
+    [Fact]
+    public void BlowfishTablesAreTheDigitsOfPi()
+    {
+        Assert.Equal(18, BlowfishConstants.P.Length);
+        Assert.Equal(1024, BlowfishConstants.S.Length);
+        Assert.Equal(0x243f6a88u, BlowfishConstants.P[0]);
+        Assert.Equal(0x8979fb1bu, BlowfishConstants.P[17]);
+        Assert.Equal(0xd1310ba6u, BlowfishConstants.S[0]);
+        Assert.Equal(0x3ac372e6u, BlowfishConstants.S[1023]);
+    }
+
     [Theory]
     [MemberData(nameof(Utf8))]
     public void VerifiesAndReproducesUtf8Vectors(string password, string hash)
