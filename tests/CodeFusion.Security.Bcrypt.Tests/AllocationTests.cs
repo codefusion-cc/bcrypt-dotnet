@@ -218,26 +218,42 @@ public class AllocationTests
     /// <summary>
     /// The contest server's measure: 200 logins and 25 sign-ups once warm, through the workers and the pool, allocate
     /// nothing anywhere in the process. On a pool thread, as a server without a synchronization context runs them.
+    /// <para>
+    /// Everything is made before the first window. The process may allocate meanwhile for reasons of its own (a pool
+    /// thread starting, a method tiering up; once 1,160 B on .NET 11 in CI), which only ever adds, while a real
+    /// allocation per call shows in every window. So it measures up to six windows and keeps the least, and a failure
+    /// lists them all. (GC allocation tick events sample every 100 KB, too coarse to name a few stray bytes.)
+    /// </para>
     /// </summary>
     [Fact]
     public async Task LoginsAndSignUpsAllocateNothing()
     {
+        const int Logins = 200, Windows = 6;
         using var q = new BcryptQueue(new BcryptQueueOptions { Threads = 1 });
         byte[] pw = "password123"u8.ToArray(), wrong = "password124"u8.ToArray(), destination = new byte[Bcrypt.HashLength];
-        var (matched, allocated) = await Task.Run(async () =>
+        long[] bytes = new long[Windows];
+        int[] matched = new int[Windows];
+        int windows = await Task.Run(async () =>
         {
-            int matches = 0;
-            long before = 0;
-            for (int i = 0; i < 250; i++)
+            for (int w = -1; w < Windows; w++) // -1: the warm-up
             {
-                if (i == 50) before = GC.GetTotalAllocatedBytes(precise: true); // warmed up
-                if (await q.TryVerifyAsync(i % 2 == 0 ? pw : wrong, Hash4Ascii) == BcryptStatus.Match && i >= 50) matches++;
-                if (i % 8 == 0) (await q.TryHashAsync(pw, 4)).CopyTo(destination);
+                int matches = 0;
+                long before = GC.GetTotalAllocatedBytes(precise: true);
+                for (int i = 0; i < Logins; i++)
+                {
+                    if (await q.TryVerifyAsync(i % 2 == 0 ? pw : wrong, Hash4Ascii) == BcryptStatus.Match) matches++;
+                    if (i % 8 == 0) (await q.TryHashAsync(pw, 4)).CopyTo(destination);
+                }
+                long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+                if (w < 0) continue;
+                bytes[w] = allocated;
+                matched[w] = matches;
+                if (allocated == 0) return w + 1;
             }
-            return (matches, GC.GetTotalAllocatedBytes(precise: true) - before);
+            return Windows;
         }, TestContext.Current.CancellationToken);
-        Assert.Equal(100, matched);
-        Assert.Equal(0, allocated);
+        Assert.All(matched[..windows], m => Assert.Equal(Logins / 2, m));
+        Assert.True(bytes[windows - 1] == 0, $"every window allocated: {string.Join(", ", bytes)} B");
         Assert.True(Bcrypt.Verify("password123"u8, destination));
     }
 }
