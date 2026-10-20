@@ -272,6 +272,8 @@ public sealed unsafe class BcryptQueue : IDisposable
     /// throwing, so overload costs no exception: <see cref="BcryptStatus.Match"/> or <see cref="BcryptStatus.NoMatch"/>
     /// otherwise.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">The queue is disposed, or was disposed while the call waited (in
+    /// the returned task).</exception>
     public ValueTask<BcryptStatus> TryVerifyAsync(ReadOnlySpan<byte> passwordUtf8, ReadOnlySpan<byte> hash, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -331,6 +333,8 @@ public sealed unsafe class BcryptQueue : IDisposable
     /// <see cref="BcryptStatus.Hashed"/>, with the hash, otherwise.
     /// </summary>
     /// <exception cref="ArgumentException">The password is over 72 bytes.</exception>
+    /// <exception cref="ObjectDisposedException">The queue is disposed, or was disposed while the call waited (in
+    /// the returned task).</exception>
     public ValueTask<BcryptHashResult> TryHashAsync(ReadOnlySpan<byte> passwordUtf8, int cost = Bcrypt.DefaultCost, CancellationToken cancellationToken = default)
     {
         Bcrypt.CheckCost(cost);

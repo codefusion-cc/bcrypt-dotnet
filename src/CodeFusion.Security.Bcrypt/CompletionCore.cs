@@ -15,7 +15,8 @@ namespace CodeFusion.Security;
 /// nothing after marking the result ready. The result itself lives in the request; this keeps only whether it failed.
 /// <para>
 /// A continuation registered after completion (the result arrived between the awaiter's look and its registration)
-/// runs at once on the registering thread, as a Task's does, instead of being queued to the pool, which allocates. The
+/// runs at once on the registering thread, unless the stack is deep, instead of being queued to the pool as the
+/// runtime's core and Task do, which allocates. The compiler's state machines touch nothing after registering. The
 /// flags are honoured as the runtime's core honours them: the ExecutionContext flows, and a synchronization context or
 /// task scheduler gets the continuation.
 /// </para>
@@ -80,6 +81,9 @@ internal struct CompletionCore
     {
         ArgumentNullException.ThrowIfNull(continuation);
         Validate(token);
+        // A second await is refused before it writes anything: it must not overwrite the first one's state.
+        Action<object?>? current = Volatile.Read(ref _continuation);
+        if (current is not null && !ReferenceEquals(current, Sentinel)) throw new InvalidOperationException("a pooled ValueTask was awaited twice");
         // Everything goes in before the continuation: once it's published, Signal may run it at once.
         if ((flags & ValueTaskSourceOnCompletedFlags.FlowExecutionContext) != 0) _context = ExecutionContext.Capture();
         if ((flags & ValueTaskSourceOnCompletedFlags.UseSchedulingContext) != 0) _scheduler = CurrentScheduler();

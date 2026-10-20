@@ -44,7 +44,8 @@ public static unsafe partial class Bcrypt
     /// <summary>
     /// A new "$2b$" hash of the password in <paramref name="passwordUtf8"/>, written to <paramref name="destination"/>
     /// as ASCII. Allocates nothing. The bytes are the key as they are: UTF-8 gives the hash
-    /// <see cref="Hash(string, int)"/> gives the same text, and other bytes are taken too, as OpenBSD and Go take them.
+    /// <see cref="Hash(string, int)"/> gives the same text, and other bytes are taken too, as Go takes them. A NUL
+    /// counts, as in the string overloads; C implementations stop at the first one, so they won't verify such a hash.
     /// </summary>
     /// <returns>The bytes written: <see cref="HashLength"/>.</returns>
     /// <exception cref="ArgumentException">The password is over 72 bytes, or <paramref name="destination"/> is shorter

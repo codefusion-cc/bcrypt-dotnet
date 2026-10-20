@@ -140,8 +140,8 @@ hash.CopyTo(row.PasswordHash);
 
 - The queue copies both spans before the call returns, so their buffers can be reused at once.
 - The password's bytes are the key as they are. UTF-8 gives the same hashes as the string overloads, and other bytes
-  are taken too, as OpenBSD and Go take them. Over 72 bytes is refused, as with strings. The enhanced hashes take
-  strings only.
+  are taken too, as Go takes them. A NUL counts, as it does in a string; C implementations stop at the first one.
+  Over 72 bytes is refused, as with strings. The enhanced hashes take strings only.
 - `BcryptHash` reads out with `CopyTo`, `TryFormat` (to bytes or chars) or `AsSpan`; `ToString` makes the string.
 
 `TryVerifyAsync` and `TryHashAsync` report a full queue or a fired token as a status instead of an exception, so

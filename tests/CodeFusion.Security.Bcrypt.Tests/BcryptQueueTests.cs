@@ -258,6 +258,19 @@ public class BcryptQueueTests
         Assert.False(await next);
     }
 
+    /// <summary>A second await of a call still running throws, and the first await still gets its result: the refused
+    /// registration must not touch the first one's state.</summary>
+    [Fact]
+    public async Task ASecondAwaitWhileRunningThrowsAndTheFirstStillCompletes()
+    {
+        using var q = Queue();
+        var check = q.VerifyAsync("slow", SlowHash, Ct);
+        var first = check.AsTask();
+        var ex = Assert.Throws<InvalidOperationException>(() => { _ = check.AsTask(); });
+        Assert.Contains("awaited twice", ex.Message, StringComparison.Ordinal);
+        Assert.True(await first.WaitAsync(TimeSpan.FromSeconds(10), Ct));
+    }
+
     /// <summary>
     /// A cancelled request stays in the queue until a worker passes it, so its result is read before the request can
     /// be reused. A second read then must not release it again: it would be reused while still queued.
