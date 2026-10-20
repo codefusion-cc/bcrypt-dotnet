@@ -1,7 +1,7 @@
 # CodeFusion.Security.Bcrypt
 
 bcrypt for .NET 8, 9 and 10, tested on .NET 11 too. A check allocates no memory at all, and a new hash only its
-string. Up to five hashes run interleaved on one thread, each for a quarter to two fifths of the CPU time of a hash
+string, or nothing when it's written as bytes. Up to five hashes run interleaved on one thread, each for a quarter to two fifths of the CPU time of a hash
 alone, and `BcryptQueue` gives a server that batching without blocking its thread pool.
 
 Hashes are interchangeable with OpenBSD, Go, PHP, Python's bcrypt and BCrypt.Net-Next, including BCrypt.Net-Next's
@@ -72,7 +72,7 @@ makes one:
 ```csharp
 builder.Services.AddSingleton(new BcryptQueue(new BcryptQueueOptions
 {
-    MaxQueued = 1024, // past that, calls fail at once with BcryptQueueFullException: answer 503
+    MaxQueued = 1024, // past that, calls fail at once with BcryptQueueFullException (TryVerifyAsync says Busy): answer 503
 }));
 
 string dummyHash = Bcrypt.Hash(Guid.NewGuid().ToString(), 12);
@@ -122,6 +122,43 @@ up to 200 ms of latency.
 | A check now and then, or not a server | `Bcrypt.Verify(password, hash)` |
 | A batch you already hold | `Bcrypt.Verify(passwords, hashes, results)` |
 | A web server's sign-in and sign-up | `BcryptQueue.VerifyAsync` and `HashAsync` |
+| A server that reads passwords and keeps hashes as bytes | the byte overloads below |
+
+## Bytes instead of strings
+
+A server reads the password off the wire as bytes and may keep the hash as bytes too. The overloads that take spans
+skip both strings, and none of them allocates:
+
+```csharp
+bool ok = Bcrypt.Verify(passwordUtf8, storedHash);         // two ReadOnlySpan<byte>
+int written = Bcrypt.Hash(passwordUtf8, 12, destination);  // 60 ASCII bytes into a Span<byte>
+
+bool ok = await bcrypt.VerifyAsync(passwordUtf8, storedHash, aborted);
+BcryptHash hash = await bcrypt.HashAsync(passwordUtf8, 12); // the 60 bytes, held inline
+hash.CopyTo(row.PasswordHash);
+```
+
+- The queue copies both spans before the call returns, so their buffers can be reused at once.
+- The password's bytes are the key as they are. UTF-8 gives the same hashes as the string overloads, and other bytes
+  are taken too, as Go takes them. A NUL counts, as it does in a string; C implementations stop at the first one.
+  Over 72 bytes is refused, as with strings. The enhanced hashes take strings only.
+- `BcryptHash` reads out with `CopyTo`, `TryFormat` (to bytes or chars) or `AsSpan`; `ToString` makes the string.
+
+`TryVerifyAsync` and `TryHashAsync` report a full queue or a fired token as a status instead of an exception, so
+overload costs no exception either:
+
+```csharp
+switch (await bcrypt.TryVerifyAsync(passwordUtf8, storedHash, aborted))
+{
+    case BcryptStatus.Match: return Results.Ok(Token(user));
+    case BcryptStatus.Busy: return Results.StatusCode(503);
+    case BcryptStatus.Cancelled: return Results.Empty; // the client went away
+    default: return Results.Unauthorized(); // NoMatch, or a malformed hash
+}
+
+BcryptHashResult made = await bcrypt.TryHashAsync(passwordUtf8, 12);
+if (made.Status == BcryptStatus.Hashed) made.CopyTo(row.PasswordHash); // CopyTo throws when there is no hash
+```
 
 ## Passwords over 72 bytes
 
@@ -165,6 +202,8 @@ there are. Bytes allocated per call, measured over 2,000 calls (the cost doesn't
 | `EnhancedVerify` | **0 B** | 5,856 B |
 | `BcryptQueue.VerifyAsync` | **0 B** | |
 | `Hash` | 144 B: the returned string | 5,416 B |
+| `Verify` and `Hash` from bytes | **0 B** | |
+| `BcryptQueue.VerifyAsync`, `HashAsync`, `TryVerifyAsync` and `TryHashAsync` from bytes | **0 B** | |
 
 At 1,000 sign-ins a second, BCrypt.Net-Next makes 5 MB of garbage a second; this package makes none.
 BCrypt.Net-Next allocates a new 4 KB copy of the Blowfish tables for every hash. This package does the following:
