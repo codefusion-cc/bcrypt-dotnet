@@ -8,15 +8,16 @@ using System.Threading.Tasks.Sources;
 namespace CodeFusion.Security;
 
 /// <summary>
-/// The completion half of the runtime's ManualResetValueTaskSourceCore, without its race. That core marks a result
-/// ready before it claims the continuation slot (.NET 8 to 11). A caller that sees the result in that window reads it
-/// and releases the request, which is reset for its next call at once; the completing thread's claim then lands in
-/// that next call, whose continuation runs before its result exists. This core claims the slot first and touches
-/// nothing after marking the result ready. The result itself lives in the request; this keeps only whether it failed.
+/// The completion half of the runtime's ManualResetValueTaskSourceCore, for the queue's pooled requests. A continuation
+/// registered after completion (the result arrived between the awaiter's look and its registration) runs at once on
+/// the registering thread, unless the stack is deep, instead of being queued to the pool as the runtime's core and
+/// Task do: that queueing allocates a work item, which the queue's 0 B per call can't afford.
 /// <para>
-/// A continuation registered after completion (the result arrived between the awaiter's look and its registration)
-/// runs at once on the registering thread, unless the stack is deep, instead of being queued to the pool as the
-/// runtime's core and Task do, which allocates. The compiler's state machines touch nothing after registering. The
+/// It claims the continuation slot before it marks the result ready and touches nothing after, so whoever sees the
+/// result may read it and reset the core for its next operation at once. (The runtime's core marks the result first
+/// and claims the slot after; it stays safe only because its GetStatus reports Pending until the slot is claimed, and
+/// the queue releases a request only once its status isn't Pending.) The result itself lives in the request; this
+/// keeps only whether it failed. The compiler's state machines touch nothing after registering. The
 /// flags are honoured as the runtime's core honours them: the ExecutionContext flows, and a synchronization context or
 /// task scheduler gets the continuation.
 /// </para>

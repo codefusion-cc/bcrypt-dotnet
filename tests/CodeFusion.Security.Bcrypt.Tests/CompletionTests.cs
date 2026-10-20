@@ -4,16 +4,16 @@ using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
-// The tests read results the moment they are ready, synchronously, as the callers that hit the race did.
+// The tests read results the moment they are ready, synchronously, as a caller that polls does.
 #pragma warning disable xUnit1031
 
 namespace CodeFusion.Security.Tests;
 
 /// <summary>
-/// How a queued call completes. The runtime's ManualResetValueTaskSourceCore marks a result ready before it claims
-/// the continuation slot; a caller that read the result in between and released the request had the completion land
-/// in its next call, whose continuation then ran before its result existed. These tests pause the completing thread
-/// right after the result is ready (a static hook, so they run alone) or oversubscribe the cores to widen that window.
+/// How a queued call completes through <see cref="CompletionCore"/>. Its completion claims the continuation slot before
+/// it marks the result ready, and touches nothing after: a caller that reads the result that moment and frees the
+/// request must not get this completion in its next call. These tests pause the completing thread right after the
+/// result is ready (a static hook, so they run alone) or load the cores while callers read and reuse requests at once.
 /// </summary>
 [Collection(nameof(Measuring))]
 public class CompletionTests
@@ -53,7 +53,7 @@ public class CompletionTests
     }
 
     [Fact]
-    public async Task ACallerThatReadsAtOnceDoesNotGetTheCompletionInItsNextCall()
+    public async Task CompletionTouchesNothingAfterTheResultIsReady()
     {
         using var q = new BcryptQueue(new BcryptQueueOptions { Threads = 1 });
         using var pause = new Pause();
@@ -69,7 +69,8 @@ public class CompletionTests
         var awaiting = AwaitIt(next);
         pause.Resume.Set();
 
-        // Had the completion claimed the slot only now, it would have run that continuation before next's result.
+        // Had the completion claimed the slot only now (the runtime core's order, without its Pending guard), it would
+        // have run that continuation before next's result.
         Assert.True(await awaiting);
     }
 
@@ -92,8 +93,8 @@ public class CompletionTests
     /// <summary>
     /// Many callers each read their result the moment it is ready and queue their next call at once, which the pool
     /// most often hands the request just freed. With twice as many callers as cores, all spinning, and as many workers,
-    /// the threads that complete calls are preempted often. The runtime's window is a few instructions, so this can't
-    /// force it the way the paused test above does; it guards the whole path under load.
+    /// the threads that complete calls are preempted often. It guards the whole path under load; the paused test above
+    /// is what pins the completion's order.
     /// </summary>
     [Fact]
     public void CallersReadingAtOnceGetTheirOwnResultsWithTheCoresOversubscribed()
