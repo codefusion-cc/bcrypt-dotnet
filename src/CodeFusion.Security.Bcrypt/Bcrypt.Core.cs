@@ -216,14 +216,45 @@ public static unsafe partial class Bcrypt
     internal static bool PrepareVerify(ReadOnlySpan<char> password, ReadOnlySpan<char> hash, BcryptPrehash prehash, Input* input)
     {
         Span<byte> salt = stackalloc byte[SaltBytes];
-        int end = ParseSettings(hash, out char revision, out int cost, salt);
-        if (!IsWholeHash(hash, end)) return false;
-        return Prepare(password, salt, cost, revision, prehash, input);
+        return ParseHash(hash, out char revision, out int cost, salt) && Prepare(password, salt, cost, revision, prehash, input);
     }
+
+    /// <summary><see cref="PrepareVerify(ReadOnlySpan{char}, ReadOnlySpan{char}, BcryptPrehash, Input*)"/> of a password
+    /// and a hash as bytes; false when the hash is malformed or the password is over 72 bytes.</summary>
+    internal static bool PrepareVerify(ReadOnlySpan<byte> password, ReadOnlySpan<byte> hash, Input* input)
+    {
+        if (hash.Length > HashLength) return false;
+        Span<char> text = stackalloc char[HashLength];
+        for (int i = 0; i < hash.Length; i++) text[i] = (char)hash[i]; // a byte past ASCII widens to a char the parser refuses
+        Span<byte> salt = stackalloc byte[SaltBytes];
+        return ParseHash(text[..hash.Length], out char revision, out int cost, salt) && Prepare(password, salt, cost, revision, input);
+    }
+
+    /// <summary>The settings of a whole hash; false when it's malformed.</summary>
+    static bool ParseHash(ReadOnlySpan<char> hash, out char revision, out int cost, Span<byte> salt) =>
+        IsWholeHash(hash, ParseSettings(hash, out revision, out cost, salt));
 
     internal static bool Prepare(ReadOnlySpan<char> password, ReadOnlySpan<byte> salt, int cost, char revision, BcryptPrehash prehash, Input* input)
     {
         if (!PrepareKey(password, revision, prehash, input->Key)) return false;
+        StreamWords(salt, input->Salt);
+        salt.CopyTo(new Span<byte>(input->SaltBytes, SaltBytes));
+        input->Cost = cost;
+        input->Revision = revision;
+        return true;
+    }
+
+    /// <summary><see cref="Prepare(ReadOnlySpan{char}, ReadOnlySpan{byte}, int, char, BcryptPrehash, Input*)"/> of a
+    /// password as bytes, taken as they are: false when they are over 72.</summary>
+    internal static bool Prepare(ReadOnlySpan<byte> password, ReadOnlySpan<byte> salt, int cost, char revision, Input* input)
+    {
+        if (password.Length > MaxPasswordBytes) return false;
+        Span<byte> key = stackalloc byte[MaxPasswordBytes + 1];
+        password.CopyTo(key);
+        int n = password.Length;
+        if (revision != '\0') key[n++] = 0;
+        StreamWords(key[..n], input->Key);
+        CryptographicOperations.ZeroMemory(key);
         StreamWords(salt, input->Salt);
         salt.CopyTo(new Span<byte>(input->SaltBytes, SaltBytes));
         input->Cost = cost;
@@ -332,10 +363,12 @@ public static unsafe partial class Bcrypt
         }
     }
 
-    /// <summary>Why <see cref="Prepare"/> refused <paramref name="password"/>, for the exception.</summary>
+    /// <summary>Why <see cref="Prepare(ReadOnlySpan{char}, ReadOnlySpan{byte}, int, char, BcryptPrehash, Input*)"/> refused <paramref name="password"/>, for the exception.</summary>
     internal static string RefusalOf(ReadOnlySpan<char> password) => IsValidUtf16(password)
-        ? "bcrypt reads at most 72 UTF-8 bytes of a password; use an enhanced hash for longer ones"
+        ? TooLong
         : "the password isn't valid UTF-16: it has a lone surrogate";
+
+    internal const string TooLong = "bcrypt reads at most 72 UTF-8 bytes of a password; use an enhanced hash for longer ones";
 
     static bool IsValidUtf16(ReadOnlySpan<char> text)
     {
@@ -421,15 +454,41 @@ public static unsafe partial class Bcrypt
         return CryptographicOperations.FixedTimeEquals(MemoryMarshal.AsBytes(encoded), MemoryMarshal.AsBytes(stored));
     }
 
+    /// <summary><see cref="Matches(uint*, ReadOnlySpan{char})"/> of a stored hash as ASCII bytes.</summary>
+    internal static bool Matches(uint* c, ReadOnlySpan<byte> stored)
+    {
+        Span<byte> hash = stackalloc byte[HashBytes];
+        HashBytesOf(c, hash);
+        Span<char> encoded = stackalloc char[HashChars];
+        Encode(hash, encoded);
+        Span<byte> ascii = stackalloc byte[HashChars];
+        for (int i = 0; i < HashChars; i++) ascii[i] = (byte)encoded[i];
+        return CryptographicOperations.FixedTimeEquals(ascii, stored);
+    }
+
     /// <summary>The finished hash: "$2b$10$" + salt + hash, or "$2$10$" + ... for the original revision.</summary>
     internal static string Format(Input* input, uint* c)
     {
-        Span<char> s = stackalloc char[60];
+        Span<char> s = stackalloc char[HashLength];
+        return new string(s[..Format(input, c, s)]);
+    }
+
+    /// <summary>The finished hash as ASCII bytes; returns the length written.</summary>
+    internal static int Format(Input* input, uint* c, Span<byte> destination)
+    {
+        Span<char> s = stackalloc char[HashLength];
+        int n = Format(input, c, s);
+        for (int i = 0; i < n; i++) destination[i] = (byte)s[i];
+        return n;
+    }
+
+    static int Format(Input* input, uint* c, Span<char> s)
+    {
         int at = WriteSettings(s, input->Revision, input->Cost, new ReadOnlySpan<byte>(input->SaltBytes, SaltBytes));
         Span<byte> hash = stackalloc byte[HashBytes];
         HashBytesOf(c, hash);
         Encode(hash, s.Slice(at, HashChars));
-        return new string(s[..(at + HashChars)]);
+        return at + HashChars;
     }
 
     /// <summary>Writes "$2b$10$" + 22 salt characters; returns the length written.</summary>

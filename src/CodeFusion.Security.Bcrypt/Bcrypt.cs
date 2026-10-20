@@ -32,10 +32,38 @@ public static unsafe partial class Bcrypt
     /// <summary>The longest password, in UTF-8 bytes, that bcrypt reads in full.</summary>
     public const int MaxPasswordBytes = 72;
 
+    /// <summary>The length of a hash this library makes, in characters or ASCII bytes: "$2b$", the cost, "$", 22 salt
+    /// characters and 31 hash characters.</summary>
+    public const int HashLength = 60;
+
     /// <summary>A new "$2b$" hash of <paramref name="password"/> with a random salt.</summary>
     /// <exception cref="ArgumentException">The password is over 72 UTF-8 bytes or isn't valid UTF-16.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="cost"/> is outside 4 to 31.</exception>
     public static string Hash(string password, int cost = DefaultCost) => Hash(password, cost, BcryptPrehash.None);
+
+    /// <summary>
+    /// A new "$2b$" hash of the password in <paramref name="passwordUtf8"/>, written to <paramref name="destination"/>
+    /// as ASCII. Allocates nothing. The bytes are the key as they are: UTF-8 gives the hash
+    /// <see cref="Hash(string, int)"/> gives the same text, and other bytes are taken too, as OpenBSD and Go take them.
+    /// </summary>
+    /// <returns>The bytes written: <see cref="HashLength"/>.</returns>
+    /// <exception cref="ArgumentException">The password is over 72 bytes, or <paramref name="destination"/> is shorter
+    /// than <see cref="HashLength"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="cost"/> is outside 4 to 31.</exception>
+    public static int Hash(ReadOnlySpan<byte> passwordUtf8, int cost, Span<byte> destination)
+    {
+        CheckCost(cost);
+        if (destination.Length < HashLength) throw new ArgumentException($"the destination must hold {HashLength} bytes", nameof(destination));
+        Input input;
+        Span<byte> salt = stackalloc byte[SaltBytes];
+        RandomNumberGenerator.Fill(salt);
+        if (!Prepare(passwordUtf8, salt, cost, 'b', &input)) throw new ArgumentException(TooLong, nameof(passwordUtf8));
+        uint* ct = stackalloc uint[6];
+        Run(&input, 1, ct);
+        int written = Format(&input, ct, destination);
+        Wipe(&input, 1);
+        return written;
+    }
 
     /// <summary>
     /// The hash of <paramref name="password"/> with the revision, cost and salt of <paramref name="salt"/>: a value
@@ -47,6 +75,21 @@ public static unsafe partial class Bcrypt
     /// <summary>Whether <paramref name="password"/> matches <paramref name="hash"/>. A malformed hash, or a password
     /// over 72 UTF-8 bytes or not valid UTF-16, never matches. Never throws for any non-null input.</summary>
     public static bool Verify(string password, string hash) => Verify(password, hash, BcryptPrehash.None);
+
+    /// <summary>
+    /// Whether the password in <paramref name="passwordUtf8"/> matches <paramref name="hash"/>, its ASCII bytes. As
+    /// <see cref="Verify(string, string)"/> for the UTF-8 of the same text; other bytes are taken as they are. A
+    /// malformed hash, or a password over 72 bytes, never matches. Allocates nothing and never throws.
+    /// </summary>
+    public static bool Verify(ReadOnlySpan<byte> passwordUtf8, ReadOnlySpan<byte> hash)
+    {
+        Input input;
+        if (!PrepareVerify(passwordUtf8, hash, &input)) return false;
+        uint* ct = stackalloc uint[6];
+        Run(&input, 1, ct);
+        Wipe(&input, 1);
+        return Matches(ct, hash[^HashChars..]);
+    }
 
     /// <summary>
     /// Checks <c>passwords[i]</c> against <c>hashes[i]</c> into <c>results[i]</c>, up to five at a time interleaved on

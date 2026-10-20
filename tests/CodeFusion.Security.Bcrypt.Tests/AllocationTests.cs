@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
@@ -116,5 +117,97 @@ public class AllocationTests
             if (t > 0) least = Math.Min(least, GC.GetTotalAllocatedBytes(precise: true) - before);
         }
         Assert.Equal(oneString * Calls, least);
+    }
+
+    static readonly byte[] Hash4Ascii = Encoding.ASCII.GetBytes(Hash4);
+
+    [Fact]
+    public void Utf8VerifyAllocatesNothing()
+    {
+        Assert.Equal(0, OnThisThread(() => Assert.True(Bcrypt.Verify("password123"u8, Hash4Ascii))));
+        Assert.Equal(0, OnThisThread(() => Assert.False(Bcrypt.Verify("wrong"u8, Hash4Ascii))));
+        Assert.Equal(0, OnThisThread(() => Assert.False(Bcrypt.Verify("password123"u8, "malformed"u8))));
+        byte[] tooLong = new byte[100];
+        Assert.Equal(0, OnThisThread(() => Assert.False(Bcrypt.Verify(tooLong, Hash4Ascii))));
+    }
+
+    [Fact]
+    public void Utf8HashAllocatesNothing()
+    {
+        byte[] destination = new byte[Bcrypt.HashLength];
+        Assert.Equal(0, OnThisThread(() => Assert.True(Bcrypt.Hash("password123"u8, 4, destination) == 60)));
+    }
+
+    [Fact]
+    public async Task QueuedUtf8VerifyAllocatesNothing()
+    {
+        using var q = new BcryptQueue(new BcryptQueueOptions { Threads = 1 });
+        long least = long.MaxValue;
+        for (int t = 0; t < Tries; t++)
+        {
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            for (int i = 0; i < Calls; i++)
+            {
+                ValueTask<bool> a = q.VerifyAsync("password123"u8, Hash4Ascii), b = q.VerifyAsync("wrong"u8, Hash4Ascii);
+                ValueTask<BcryptStatus> c = q.TryVerifyAsync("password123"u8, Hash4Ascii), d = q.TryVerifyAsync("wrong"u8, Hash4Ascii);
+                Assert.True(await a & !await b);
+                Assert.True(await c == BcryptStatus.Match & await d == BcryptStatus.NoMatch); // Assert.Equal allocates
+            }
+            if (t > 0) least = Math.Min(least, GC.GetTotalAllocatedBytes(precise: true) - before);
+        }
+        Assert.Equal(0, least);
+    }
+
+    [Fact]
+    public async Task QueuedUtf8HashAllocatesNothing()
+    {
+        using var q = new BcryptQueue(new BcryptQueueOptions { Threads = 1 });
+        byte[] destination = new byte[Bcrypt.HashLength];
+        long least = long.MaxValue;
+        for (int t = 0; t < Tries; t++)
+        {
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            for (int i = 0; i < Calls; i++)
+            {
+                ValueTask<BcryptHash> a = q.HashAsync("password123"u8, 4);
+                ValueTask<BcryptHashResult> b = q.TryHashAsync("password123"u8, 4);
+                (await a).CopyTo(destination);
+                var tried = await b;
+                Assert.True(tried.Status == BcryptStatus.Hashed && tried.Hash.Length == 60);
+            }
+            if (t > 0) least = Math.Min(least, GC.GetTotalAllocatedBytes(precise: true) - before);
+        }
+        Assert.Equal(0, least);
+        Assert.True(Bcrypt.Verify("password123"u8, destination));
+    }
+
+    /// <summary>A full queue and a cancelled token are statuses: no exception, no task, nothing allocated.</summary>
+    [Fact]
+    public async Task BusyAndCancelledAllocateNothing()
+    {
+        using var q = new BcryptQueue(new BcryptQueueOptions { Threads = 1, Lanes = 1, MaxQueued = 1 });
+        var slow = q.VerifyAsync("slow", Bcrypt.Hash("slow", 13));
+        while (q.QueueLength != 0) await Task.Delay(1);
+        var queued = q.TryVerifyAsync("password123"u8, Hash4Ascii);
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        CancellationToken cancelled = cts.Token;
+        long least = long.MaxValue;
+        for (int t = 0; t < Tries; t++)
+        {
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            for (int i = 0; i < Calls; i++)
+            {
+                Assert.True(await q.TryVerifyAsync("password123"u8, Hash4Ascii) == BcryptStatus.Busy);
+                Assert.True((await q.TryHashAsync("password123"u8, 4)).Status == BcryptStatus.Busy);
+                Assert.True(await q.TryVerifyAsync("password123"u8, Hash4Ascii, cancelled) == BcryptStatus.Cancelled);
+                Assert.True((await q.TryHashAsync("password123"u8, 4, cancelled)).Status == BcryptStatus.Cancelled);
+            }
+            if (t > 0) least = Math.Min(least, GC.GetTotalAllocatedBytes(precise: true) - before);
+        }
+        Assert.False(slow.IsCompleted); // the queue stayed full throughout
+        Assert.Equal(0, least);
+        Assert.True(await slow);
+        Assert.Equal(BcryptStatus.Match, await queued);
     }
 }

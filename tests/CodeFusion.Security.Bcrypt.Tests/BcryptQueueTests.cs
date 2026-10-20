@@ -211,7 +211,7 @@ public class BcryptQueueTests
         using var q = Queue();
         Assert.Throws<ArgumentException>(() => q.HashAsync(new string('a', 73), 4, Ct));
         Assert.Throws<ArgumentOutOfRangeException>(() => q.HashAsync("x", 3, Ct));
-        Assert.Throws<ArgumentNullException>(() => q.HashAsync(null!, 4, Ct));
+        Assert.Throws<ArgumentNullException>(() => q.HashAsync((string)null!, 4, Ct));
         Assert.Throws<ArgumentNullException>(() => q.VerifyAsync(null!, Hash4, Ct));
         Assert.Throws<ArgumentNullException>(() => q.VerifyAsync("x", null!, Ct));
         Assert.True(await q.VerifyAsync("password123", Hash4, Ct)); // the refusals left nothing behind

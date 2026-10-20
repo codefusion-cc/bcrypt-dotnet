@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Sources;
@@ -32,11 +33,16 @@ public sealed unsafe class BcryptQueue : IDisposable
     const int Linking = 0, Queued = 1, Out = 2;
 
     /// <summary>One hash or check. Two references keep it from reuse: the queue's entry and the caller's await.</summary>
-    sealed class Request(BcryptQueue owner) : IValueTaskSource<bool>, IValueTaskSource<string>, IThreadPoolWorkItem
+    sealed class Request(BcryptQueue owner) : IValueTaskSource<bool>, IValueTaskSource<string>, IValueTaskSource<BcryptHash>,
+        IValueTaskSource<BcryptStatus>, IValueTaskSource<BcryptHashResult>, IThreadPoolWorkItem
     {
-        ManualResetValueTaskSourceCore<bool> _core; // continuations run inline: Execute already runs on the pool
+        CompletionCore _core; // continuations run inline: Execute already runs on the pool
         public Bcrypt.Input Input; // prepared on the caller's thread; cleared once a worker has copied it
-        public string? Stored; // a check: the stored hash; null for a new hash
+        /// <summary>A check: the stored hash's last 31 characters, copied on the caller's thread. A new hash: the hash,
+        /// once made.</summary>
+        public BcryptHash.Buffer Bytes;
+        public bool Verifying;
+        public bool Quiet; // a Try call: a cancellation completes it with a status, not an exception
         public long Enqueued;
         public CancellationToken Token;
         public CancellationTokenRegistration Registration;
@@ -45,24 +51,30 @@ public sealed unsafe class BcryptQueue : IDisposable
         public bool CancelledWhileLinking;
         public int Refs;
         int _consumed;
-        bool _match;
-        string? _hash;
+        BcryptStatus _status;
         Exception? _error;
 
         public short Version => _core.Version;
 
         /// <summary>Completes on a pool thread, so the caller's continuation never runs on a bcrypt worker.</summary>
-        public void Complete(bool match, string? hash, Exception? error)
+        public void Complete(BcryptStatus status, Exception? error)
         {
-            _match = match;
-            _hash = hash;
+            _status = status;
             _error = error;
             ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
         }
 
+        /// <summary>Completes a request whose token fired before a worker took it.</summary>
+        public void CompleteCancelled()
+        {
+            fixed (Bcrypt.Input* input = &Input) Bcrypt.Wipe(input, 1);
+            if (Quiet) Complete(BcryptStatus.Cancelled, null);
+            else Complete(BcryptStatus.NoMatch, new OperationCanceledException(Token));
+        }
+
         void IThreadPoolWorkItem.Execute()
         {
-            if (_error is null) _core.SetResult(_match);
+            if (_error is null) _core.SetResult();
             else _core.SetException(_error);
         }
 
@@ -81,8 +93,7 @@ public sealed unsafe class BcryptQueue : IDisposable
             owner._ready.Wait(0); // drop its wake-up; if a worker already has that one, it wakes to fewer requests
             Interlocked.Decrement(ref owner._queued);
             Interlocked.Increment(ref owner._cancelled);
-            fixed (Bcrypt.Input* input = &Input) Bcrypt.Wipe(input, 1);
-            Complete(false, null, new OperationCanceledException(Token));
+            CompleteCancelled();
             Release(); // last: once the caller has read the result too, the request is reused
         }
 
@@ -94,19 +105,21 @@ public sealed unsafe class BcryptQueue : IDisposable
         public void Reset()
         {
             fixed (Bcrypt.Input* input = &Input) Bcrypt.Wipe(input, 1);
-            Stored = null;
+            ((Span<byte>)Bytes).Clear();
+            Verifying = Quiet = false;
             Token = default;
             Registration = default;
             Prev = Next = null;
             Stage = Linking;
             CancelledWhileLinking = false;
             _consumed = 0;
-            _hash = null;
+            _status = BcryptStatus.NoMatch;
             _error = null;
             _core.Reset();
         }
 
-        void Consume(short token)
+        /// <summary>Checks the caller's token, throws a failure, and releases the request once its result is copied.</summary>
+        T Read<T>(short token, Func<Request, T> result)
         {
             // Reading a result before it's ready (.Result or .GetAwaiter().GetResult() on a pending ValueTask) must not
             // release the request: a worker still holds it, and it would be reused for another caller meanwhile.
@@ -115,25 +128,24 @@ public sealed unsafe class BcryptQueue : IDisposable
             // A second await of the same ValueTask would release the request twice and hand it to two callers.
             if (token != _core.Version || Interlocked.Exchange(ref _consumed, 1) != 0)
                 throw new InvalidOperationException("a BcryptQueue result was awaited twice or after it was reused; await each ValueTask once");
-        }
-
-        bool IValueTaskSource<bool>.GetResult(short token)
-        {
-            Consume(token);
-            try { return _core.GetResult(token); }
-            finally { Release(); }
-        }
-
-        string IValueTaskSource<string>.GetResult(short token)
-        {
-            Consume(token);
             try
             {
                 _core.GetResult(token);
-                return _hash!;
+                return result(this);
             }
             finally { Release(); }
         }
+
+        bool IValueTaskSource<bool>.GetResult(short token) => Read(token, static r => r._status == BcryptStatus.Match);
+
+        string IValueTaskSource<string>.GetResult(short token) => Read(token, static r => new BcryptHash(r.Bytes).ToString());
+
+        BcryptHash IValueTaskSource<BcryptHash>.GetResult(short token) => Read(token, static r => new BcryptHash(r.Bytes));
+
+        BcryptStatus IValueTaskSource<BcryptStatus>.GetResult(short token) => Read(token, static r => r._status);
+
+        BcryptHashResult IValueTaskSource<BcryptHashResult>.GetResult(short token) =>
+            Read(token, static r => new BcryptHashResult(r._status, r._status == BcryptStatus.Hashed ? new BcryptHash(r.Bytes) : default));
 
         public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
 
@@ -233,8 +245,39 @@ public sealed unsafe class BcryptQueue : IDisposable
             Recycle(r);
             return new ValueTask<bool>(false);
         }
-        r.Stored = hash;
-        return Enqueue(r, cancellationToken, out var error) is { } version ? new ValueTask<bool>(r, version) : ValueTask.FromException<bool>(error!);
+        r.Verifying = true;
+        Encoding.ASCII.GetBytes(hash.AsSpan(hash.Length - Bcrypt.HashChars), r.Bytes); // checked: all ASCII
+        return Enqueue(r, cancellationToken, out short version) ? new ValueTask<bool>(r, version) : ValueTask.FromException<bool>(new BcryptQueueFullException());
+    }
+
+    /// <summary>
+    /// <see cref="VerifyAsync(string, string, CancellationToken)"/> of a password and a stored hash as bytes, which it
+    /// copies before it returns: the buffers can be reused at once. Allocates nothing. The password's bytes are the key
+    /// as they are (UTF-8 matches the string overload); a malformed hash or a password over 72 bytes is false at once,
+    /// without queueing.
+    /// </summary>
+    /// <exception cref="BcryptQueueFullException">The queue is full (in the returned task); see
+    /// <see cref="TryVerifyAsync"/> for a status instead.</exception>
+    public ValueTask<bool> VerifyAsync(ReadOnlySpan<byte> passwordUtf8, ReadOnlySpan<byte> hash, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (cancellationToken.IsCancellationRequested) return ValueTask.FromCanceled<bool>(cancellationToken);
+        if (RentCheck(passwordUtf8, hash, quiet: false) is not { } r) return new ValueTask<bool>(false);
+        return Enqueue(r, cancellationToken, out short version) ? new ValueTask<bool>(r, version) : ValueTask.FromException<bool>(new BcryptQueueFullException());
+    }
+
+    /// <summary>
+    /// <see cref="VerifyAsync(ReadOnlySpan{byte}, ReadOnlySpan{byte}, CancellationToken)"/> that reports a full queue
+    /// as <see cref="BcryptStatus.Busy"/> and a fired token as <see cref="BcryptStatus.Cancelled"/> instead of
+    /// throwing, so overload costs no exception: <see cref="BcryptStatus.Match"/> or <see cref="BcryptStatus.NoMatch"/>
+    /// otherwise.
+    /// </summary>
+    public ValueTask<BcryptStatus> TryVerifyAsync(ReadOnlySpan<byte> passwordUtf8, ReadOnlySpan<byte> hash, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (cancellationToken.IsCancellationRequested) return new ValueTask<BcryptStatus>(BcryptStatus.Cancelled);
+        if (RentCheck(passwordUtf8, hash, quiet: true) is not { } r) return new ValueTask<BcryptStatus>(BcryptStatus.NoMatch);
+        return Enqueue(r, cancellationToken, out short version) ? new ValueTask<BcryptStatus>(r, version) : new ValueTask<BcryptStatus>(BcryptStatus.Busy);
     }
 
     /// <summary>A new "$2b$" hash of <paramref name="password"/>; see <see cref="Bcrypt.Hash(string, int)"/>.</summary>
@@ -262,8 +305,70 @@ public sealed unsafe class BcryptQueue : IDisposable
             Recycle(r);
             throw new ArgumentException(Bcrypt.RefusalOf(password), nameof(password));
         }
-        r.Stored = null;
-        return Enqueue(r, cancellationToken, out var error) is { } version ? new ValueTask<string>(r, version) : ValueTask.FromException<string>(error!);
+        return Enqueue(r, cancellationToken, out short version) ? new ValueTask<string>(r, version) : ValueTask.FromException<string>(new BcryptQueueFullException());
+    }
+
+    /// <summary>
+    /// A new "$2b$" hash of the password in <paramref name="passwordUtf8"/>, held inline instead of in a string: see
+    /// <see cref="Bcrypt.Hash(ReadOnlySpan{byte}, int, Span{byte})"/>. Copies the password before it returns and
+    /// allocates nothing.
+    /// </summary>
+    /// <exception cref="ArgumentException">The password is over 72 bytes.</exception>
+    /// <exception cref="BcryptQueueFullException">The queue is full (in the returned task); see
+    /// <see cref="TryHashAsync"/> for a status instead.</exception>
+    public ValueTask<BcryptHash> HashAsync(ReadOnlySpan<byte> passwordUtf8, int cost = Bcrypt.DefaultCost, CancellationToken cancellationToken = default)
+    {
+        Bcrypt.CheckCost(cost);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (cancellationToken.IsCancellationRequested) return ValueTask.FromCanceled<BcryptHash>(cancellationToken);
+        var r = RentHash(passwordUtf8, cost, quiet: false);
+        return Enqueue(r, cancellationToken, out short version) ? new ValueTask<BcryptHash>(r, version) : ValueTask.FromException<BcryptHash>(new BcryptQueueFullException());
+    }
+
+    /// <summary>
+    /// <see cref="HashAsync(ReadOnlySpan{byte}, int, CancellationToken)"/> that reports a full queue as
+    /// <see cref="BcryptStatus.Busy"/> and a fired token as <see cref="BcryptStatus.Cancelled"/> instead of throwing;
+    /// <see cref="BcryptStatus.Hashed"/>, with the hash, otherwise.
+    /// </summary>
+    /// <exception cref="ArgumentException">The password is over 72 bytes.</exception>
+    public ValueTask<BcryptHashResult> TryHashAsync(ReadOnlySpan<byte> passwordUtf8, int cost = Bcrypt.DefaultCost, CancellationToken cancellationToken = default)
+    {
+        Bcrypt.CheckCost(cost);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (cancellationToken.IsCancellationRequested) return new ValueTask<BcryptHashResult>(new BcryptHashResult(BcryptStatus.Cancelled, default));
+        var r = RentHash(passwordUtf8, cost, quiet: true);
+        return Enqueue(r, cancellationToken, out short version)
+            ? new ValueTask<BcryptHashResult>(r, version)
+            : new ValueTask<BcryptHashResult>(new BcryptHashResult(BcryptStatus.Busy, default));
+    }
+
+    /// <summary>A request checking <paramref name="password"/> against <paramref name="hash"/>; null when the hash is
+    /// malformed or the password is over 72 bytes.</summary>
+    Request? RentCheck(ReadOnlySpan<byte> password, ReadOnlySpan<byte> hash, bool quiet)
+    {
+        var r = Rent();
+        bool ok;
+        fixed (Bcrypt.Input* input = &r.Input) ok = Bcrypt.PrepareVerify(password, hash, input);
+        if (!ok)
+        {
+            Recycle(r);
+            return null;
+        }
+        r.Verifying = true;
+        r.Quiet = quiet;
+        hash[^Bcrypt.HashChars..].CopyTo(r.Bytes);
+        return r;
+    }
+
+    Request RentHash(ReadOnlySpan<byte> passwordUtf8, int cost, bool quiet)
+    {
+        if (passwordUtf8.Length > Bcrypt.MaxPasswordBytes) throw new ArgumentException(Bcrypt.TooLong, nameof(passwordUtf8));
+        var r = Rent();
+        Span<byte> salt = stackalloc byte[Bcrypt.SaltBytes];
+        RandomNumberGenerator.Fill(salt);
+        fixed (Bcrypt.Input* input = &r.Input) Bcrypt.Prepare(passwordUtf8, salt, cost, 'b', input);
+        r.Quiet = quiet;
+        return r;
     }
 
     /// <summary>
@@ -278,18 +383,18 @@ public sealed unsafe class BcryptQueue : IDisposable
         Drain();
     }
 
-    short? Enqueue(Request r, CancellationToken cancellationToken, out Exception? error)
+    /// <summary>Queues <paramref name="r"/> and gives the version its ValueTask needs; false when the queue is full,
+    /// and <paramref name="r"/> is recycled.</summary>
+    bool Enqueue(Request r, CancellationToken cancellationToken, out short version)
     {
-        error = null;
+        version = r.Version; // read before a worker can complete and recycle r
         if (Interlocked.Increment(ref _queued) > _maxQueued)
         {
             Interlocked.Decrement(ref _queued);
             Interlocked.Increment(ref _refused);
             Recycle(r);
-            error = new BcryptQueueFullException();
-            return null;
+            return false;
         }
-        short version = r.Version; // read before a worker can complete and recycle r
         r.Refs = 2;
         r.Enqueued = Stopwatch.GetTimestamp();
         r.Token = cancellationToken;
@@ -305,14 +410,13 @@ public sealed unsafe class BcryptQueue : IDisposable
             r.Registration = default;
             Interlocked.Decrement(ref _queued);
             Interlocked.Increment(ref _cancelled);
-            fixed (Bcrypt.Input* input = &r.Input) Bcrypt.Wipe(input, 1);
-            r.Complete(false, null, new OperationCanceledException(cancellationToken));
+            r.CompleteCancelled();
             r.Release(); // the queue's reference
-            return version;
+            return true;
         }
         _ready.Release();
         if (Volatile.Read(ref _disposed) != 0) Drain(); // raced Dispose: nothing would take it
-        return version;
+        return true;
     }
 
     /// <summary>Fails every request still queued; after Dispose.</summary>
@@ -321,7 +425,7 @@ public sealed unsafe class BcryptQueue : IDisposable
         while (TakeFirst() is { } r)
         {
             Interlocked.Decrement(ref _queued);
-            r.Complete(false, null, new ObjectDisposedException(nameof(BcryptQueue)));
+            r.Complete(BcryptStatus.NoMatch, new ObjectDisposedException(nameof(BcryptQueue)));
             r.Taken();
         }
     }
@@ -435,7 +539,7 @@ public sealed unsafe class BcryptQueue : IDisposable
             {
                 for (int i = 0; i < n; i++)
                 {
-                    batch[i]?.Complete(false, null, e);
+                    batch[i]?.Complete(BcryptStatus.NoMatch, e);
                     batch[i] = null;
                 }
             }
@@ -455,8 +559,12 @@ public sealed unsafe class BcryptQueue : IDisposable
         {
             var r = Batch[i]!;
             Batch[i] = null;
-            if (r.Stored is { } stored) r.Complete(Bcrypt.Matches(Ct + 6 * i, stored.AsSpan(stored.Length - Bcrypt.HashChars)), null, null);
-            else r.Complete(false, Bcrypt.Format(Inputs + i, Ct + 6 * i), null);
+            if (r.Verifying) r.Complete(Bcrypt.Matches(Ct + 6 * i, ((ReadOnlySpan<byte>)r.Bytes)[..Bcrypt.HashChars]) ? BcryptStatus.Match : BcryptStatus.NoMatch, null);
+            else
+            {
+                Bcrypt.Format(Inputs + i, Ct + 6 * i, r.Bytes);
+                r.Complete(BcryptStatus.Hashed, null);
+            }
         }
     }
 
