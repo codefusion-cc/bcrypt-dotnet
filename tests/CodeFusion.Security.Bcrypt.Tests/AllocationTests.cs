@@ -187,7 +187,11 @@ public class AllocationTests
     {
         using var q = new BcryptQueue(new BcryptQueueOptions { Threads = 1, Lanes = 1, MaxQueued = 1 });
         var slow = q.VerifyAsync("slow", Bcrypt.Hash("slow", 13));
-        while (q.QueueLength != 0) await Task.Delay(1);
+        for (int i = 0; q.QueueLength != 0; i++)
+        {
+            Assert.True(i < 10_000, "the slow check was never taken");
+            await Task.Delay(1, TestContext.Current.CancellationToken);
+        }
         var queued = q.TryVerifyAsync("password123"u8, Hash4Ascii);
         using var cts = new CancellationTokenSource();
         await cts.CancelAsync();

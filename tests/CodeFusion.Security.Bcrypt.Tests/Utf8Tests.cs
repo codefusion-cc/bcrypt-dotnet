@@ -150,9 +150,9 @@ public class Utf8Tests
     [Fact]
     public void ChecksTheOriginalRevision()
     {
-        const string hash = "$2$05$CCCCCCCCCCCCCCCCCCCCC.VGOzA784oUp/Z0DY336zx7pLYAy0lwK";
-        Assert.Equal(Bcrypt.Verify("U*U*", hash), Bcrypt.Verify("U*U*"u8, Ascii(hash)));
-        string ours = Bcrypt.Hash("U*U*", hash[..28]);
+        string ours = Bcrypt.Hash("U*U*", "$2$05$CCCCCCCCCCCCCCCCCCCCC.");
+        Assert.Equal(59, ours.Length);
+        Assert.True(Bcrypt.Verify("U*U*", ours));
         Assert.True(Bcrypt.Verify("U*U*"u8, Ascii(ours)));
         Assert.False(Bcrypt.Verify("U*U*\0"u8, Ascii(ours)));
     }

@@ -31,7 +31,7 @@ public class CompletionTests
     /// <summary>Pauses the first completion after its result is ready, until <c>resume</c> is set.</summary>
     sealed class Pause : IDisposable
     {
-        int _once;
+        int _once, _left;
         public readonly ManualResetEventSlim Paused = new(), Resume = new();
 
         public Pause() => CompletionCore.AfterReadyForTests = () =>
@@ -39,12 +39,15 @@ public class CompletionTests
             if (Interlocked.Exchange(ref _once, 1) != 0) return;
             Paused.Set();
             Resume.Wait(TimeSpan.FromSeconds(30));
+            Volatile.Write(ref _left, 1);
         };
 
         public void Dispose()
         {
             CompletionCore.AfterReadyForTests = null;
             Resume.Set();
+            // The paused thread may still be waking inside Wait: dispose the events only once it has left.
+            if (Paused.IsSet) SpinWait.SpinUntil(() => Volatile.Read(ref _left) != 0, TimeSpan.FromSeconds(30));
             Paused.Dispose();
             Resume.Dispose();
         }
