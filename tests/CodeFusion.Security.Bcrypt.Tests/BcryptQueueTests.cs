@@ -435,6 +435,7 @@ public class BcryptQueueTests
         Assert.True(await q.VerifyAsync("password123", Hash4, Ct));
     }
 
-    static object Source<T>(ValueTask<T> task) =>
+    /// <summary>The pooled request behind a ValueTask.</summary>
+    internal static object Source<T>(ValueTask<T> task) =>
         typeof(ValueTask<T>).GetField("_obj", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(task)!;
 }

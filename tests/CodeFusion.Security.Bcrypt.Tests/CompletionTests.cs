@@ -1,6 +1,5 @@
 using System;
 using System.Diagnostics;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
@@ -66,7 +65,7 @@ public class CompletionTests
         Assert.True(first.GetAwaiter().GetResult());
         // The next call gets that request back and waits on it with a continuation.
         var next = q.VerifyAsync("slow", SlowHash, Ct);
-        Assert.Same(Source(first), Source(next));
+        Assert.Same(BcryptQueueTests.Source(first), BcryptQueueTests.Source(next));
         var awaiting = AwaitIt(next);
         pause.Resume.Set();
 
@@ -173,7 +172,4 @@ public class CompletionTests
         Assert.Equal("caller", await seen.Task);
         Assert.True(check.GetAwaiter().GetResult());
     }
-
-    static object Source<T>(ValueTask<T> task) =>
-        typeof(ValueTask<T>).GetField("_obj", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(task)!;
 }
