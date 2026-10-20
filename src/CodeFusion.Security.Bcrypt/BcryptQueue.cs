@@ -210,6 +210,10 @@ public sealed unsafe class BcryptQueue : IDisposable
     /// <summary>Calls cancelled before a worker took them.</summary>
     public long Cancelled => Interlocked.Read(ref _cancelled);
 
+    /// <summary>For the tests: the clock that times a request's arrival and its run's window, in
+    /// <see cref="Stopwatch"/> ticks.</summary>
+    internal TimeProvider Clock = TimeProvider.System;
+
     /// <summary>For the tests: runs between a request's cancellation registration and its linking into the queue.</summary>
     internal Action? BeforeLinkForTests;
 
@@ -406,7 +410,7 @@ public sealed unsafe class BcryptQueue : IDisposable
         }
         while (Interlocked.CompareExchange(ref _queued, queued + 1, queued) != queued);
         r.Refs = 2;
-        r.Enqueued = Stopwatch.GetTimestamp();
+        r.Enqueued = Clock.GetTimestamp();
         r.Token = cancellationToken;
         // Registered before it's linked, so a callback only ever sees this call's request, never one reused for another
         // call. A token that fires before the link (even during the registration itself) marks the request, and it's
@@ -592,7 +596,7 @@ public sealed unsafe class BcryptQueue : IDisposable
             if (n == 0) ms = 1000; // wakes now and then to notice Dispose even if another worker took its wake-up
             else
             {
-                long left = deadline - Stopwatch.GetTimestamp();
+                long left = deadline - Clock.GetTimestamp();
                 ms = left > 0 ? (int)((left * 1000 + Stopwatch.Frequency - 1) / Stopwatch.Frequency) : 0;
             }
             if (!_ready.Wait(ms))

@@ -447,24 +447,35 @@ public class BcryptQueueUtf8Tests
         Assert.True(Bcrypt.Verify("alpha"u8, text));
     }
 
+    /// <summary>A clock the test moves by hand, in Stopwatch ticks.</summary>
+    sealed class ManualClock : TimeProvider
+    {
+        long _now = Stopwatch.GetTimestamp();
+
+        public override long GetTimestamp() => Volatile.Read(ref _now);
+
+        public void Advance(TimeSpan by) => Interlocked.Add(ref _now, (long)(by.TotalSeconds * Stopwatch.Frequency));
+    }
+
     /// <summary>
     /// The batching window runs from the first call's arrival, not from when a worker takes it: a call that waited out
-    /// the window behind a long run runs at once instead of waiting a second window for company.
+    /// the window (behind a long run, say) runs at once instead of waiting a second window for company. The clock moves
+    /// past the window after the call's arrival is stamped and before it is linked, so the worker always finds it too
+    /// old to wait for, however loaded the machine. Timed from its taking instead, it would wait the whole 30 seconds.
     /// </summary>
     [Fact]
     public async Task ACallOlderThanTheWindowRunsWithoutWaitingAgain()
     {
-        var window = TimeSpan.FromMilliseconds(300);
+        var window = TimeSpan.FromSeconds(30);
         using var q = Queue(windowMs: (int)window.TotalMilliseconds);
-        var start = Stopwatch.StartNew();
-        var slow = Enumerable.Range(0, Bcrypt.MaxLanes).Select(_ => q.HashAsync("pw"u8, 13, Ct)).ToArray(); // well over the window
+        var clock = new ManualClock();
+        q.Clock = clock;
+        q.BeforeLinkForTests = () => clock.Advance(window + TimeSpan.FromSeconds(1));
         var late = q.TryVerifyAsync("password123"u8, Hash4Ascii, Ct);
-        foreach (var s in slow) Assert.Equal(60, (await s).Length);
-        var run = start.Elapsed;
-        Assert.True(run > window + TimeSpan.FromMilliseconds(200), $"the run took only {run}, so the late call wasn't older than the window");
-        Assert.Equal(BcryptStatus.Match, await late);
-        var after = start.Elapsed - run;
-        Assert.True(after < window / 2, $"waited {after} after the run");
-        Assert.Equal(2, q.Batches);
+        q.BeforeLinkForTests = null;
+
+        // A third of the window: a cost-4 check on the slowest runner, with room to spare, and far short of a window.
+        Assert.Equal(BcryptStatus.Match, await late.AsTask().WaitAsync(window / 3, Ct));
+        Assert.Equal(1, q.Batches);
     }
 }
