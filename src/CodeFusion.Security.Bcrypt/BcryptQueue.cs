@@ -388,13 +388,19 @@ public sealed unsafe class BcryptQueue : IDisposable
     bool Enqueue(Request r, CancellationToken cancellationToken, out short version)
     {
         version = r.Version; // read before a worker can complete and recycle r
-        if (Interlocked.Increment(ref _queued) > _maxQueued)
+        // A slot is taken only when there is one, so a refused call never holds one that another call could use.
+        int queued;
+        do
         {
-            Interlocked.Decrement(ref _queued);
-            Interlocked.Increment(ref _refused);
-            Recycle(r);
-            return false;
+            queued = Volatile.Read(ref _queued);
+            if (queued >= _maxQueued)
+            {
+                Interlocked.Increment(ref _refused);
+                Recycle(r);
+                return false;
+            }
         }
+        while (Interlocked.CompareExchange(ref _queued, queued + 1, queued) != queued);
         r.Refs = 2;
         r.Enqueued = Stopwatch.GetTimestamp();
         r.Token = cancellationToken;

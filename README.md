@@ -157,7 +157,7 @@ switch (await bcrypt.TryVerifyAsync(passwordUtf8, storedHash, aborted))
 }
 
 BcryptHashResult made = await bcrypt.TryHashAsync(passwordUtf8, 12);
-if (made.Status == BcryptStatus.Hashed) made.Hash.CopyTo(row.PasswordHash);
+if (made.Status == BcryptStatus.Hashed) made.CopyTo(row.PasswordHash); // CopyTo throws when there is no hash
 ```
 
 ## Passwords over 72 bytes

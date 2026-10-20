@@ -17,8 +17,8 @@ public class BcryptQueueUtf8Tests
 
     static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    static BcryptQueue Queue(int threads = 1, int lanes = 5, int? maxQueued = null) =>
-        new(new BcryptQueueOptions { Threads = threads, Lanes = lanes, MaxQueued = maxQueued });
+    static BcryptQueue Queue(int threads = 1, int lanes = 5, int? maxQueued = null, int windowMs = 0) =>
+        new(new BcryptQueueOptions { Threads = threads, Lanes = lanes, MaxQueued = maxQueued, BatchWindow = TimeSpan.FromMilliseconds(windowMs) });
 
     static async Task<ValueTask<bool>> Occupy(BcryptQueue q)
     {
@@ -315,5 +315,156 @@ public class BcryptQueueUtf8Tests
         await Task.WhenAll(tasks);
         Assert.Equal(160, q.HashesRun);
         Assert.Equal(0, q.QueueLength);
+    }
+
+    // ---------- the contest server's scenarios (csharp-kestrel-xeonfx PasswordsBytesTests), on this queue ----------
+
+    static byte[] B(string s) => Encoding.UTF8.GetBytes(s);
+
+    [Fact]
+    public async Task EachCallerGetsItsOwnAnswerFromABatch()
+    {
+        using var q = Queue(windowMs: 0);
+        bool[] good = [true, false, true, true, false, false, true, false, true];
+        var checks = good.Select(g => q.TryVerifyAsync(B(g ? "password123" : "password124"), Hash4Ascii, Ct)).ToArray();
+        string[] passwords = ["alpha", "beta", "gamma", "é😀"];
+        var hashes = passwords.Select(p => q.TryHashAsync(B(p), 4, Ct)).ToArray();
+
+        for (int i = 0; i < good.Length; i++) Assert.Equal(good[i] ? BcryptStatus.Match : BcryptStatus.NoMatch, await checks[i]);
+        for (int i = 0; i < passwords.Length; i++)
+        {
+            var made = await hashes[i];
+            Assert.Equal(BcryptStatus.Hashed, made.Status);
+            byte[] text = new byte[Bcrypt.HashLength];
+            made.CopyTo(text);
+            string hash = Encoding.ASCII.GetString(text);
+            Assert.StartsWith("$2b$04$", hash, StringComparison.Ordinal);
+            Assert.True(BCrypt.Net.BCrypt.Verify(passwords[i], hash));
+            Assert.False(BCrypt.Net.BCrypt.Verify(passwords[i] + "x", hash));
+            Assert.Equal(BcryptStatus.Match, await q.TryVerifyAsync(B(passwords[i]), text, Ct));
+        }
+    }
+
+    [Theory]
+    [InlineData("not a hash")]
+    [InlineData("")]
+    [InlineData("$2a$10$ZSfEoPvlcsj2XfvsSeK25em4NZ9Jm7ntGqXuLgQfHEeZPYB8899w")] // 59 characters
+    [InlineData("$2a$10$ZSfEoPvlcsj2XfvsSeK25em4NZ9Jm7ntGqXuLgQfHEeZPYB8899wqq")] // 61
+    [InlineData("$2x$10$ZSfEoPvlcsj2XfvsSeK25em4NZ9Jm7ntGqXuLgQfHEeZPYB8899wq")]
+    [InlineData("$2a$03$ZSfEoPvlcsj2XfvsSeK25em4NZ9Jm7ntGqXuLgQfHEeZPYB8899wq")] // cost below 4
+    [InlineData("$2a$32$ZSfEoPvlcsj2XfvsSeK25em4NZ9Jm7ntGqXuLgQfHEeZPYB8899wq")]
+    [InlineData("$2a$1a$ZSfEoPvlcsj2XfvsSeK25em4NZ9Jm7ntGqXuLgQfHEeZPYB8899wq")]
+    [InlineData("$2a$10$ZSfEoPvlcsj2XfvsSeK2!em4NZ9Jm7ntGqXuLgQfHEeZPYB8899wq")] // not in the alphabet
+    public async Task AMalformedHashIsNoMatchAtOnceWithoutQueueing(string hash)
+    {
+        using var q = Queue();
+        var check = q.TryVerifyAsync("password123"u8, B(hash), Ct);
+        Assert.True(check.IsCompletedSuccessfully);
+        Assert.Equal(BcryptStatus.NoMatch, await check);
+        Assert.Equal(0, q.HashesRun);
+    }
+
+    /// <summary>Past the queue's limit a call is Busy at once: no exception, nothing queued, and the calls that got in
+    /// still get their answers.</summary>
+    [Fact]
+    public async Task AFloodPastTheLimitIsBusyAtOnce()
+    {
+        const int limit = 40, extra = 10;
+        using var q = Queue(maxQueued: limit);
+        var slow = await Occupy(q);
+        var all = Enumerable.Range(0, limit + extra).Select(i => q.TryVerifyAsync(i % 2 == 0 ? "password123"u8 : "password124"u8, Hash4Ascii, Ct)).ToArray();
+        int busy = 0;
+        for (int i = 0; i < all.Length; i++) // each awaited exactly once
+        {
+            bool atOnce = all[i].IsCompleted;
+            var r = await all[i];
+            if (r == BcryptStatus.Busy)
+            {
+                Assert.True(atOnce);
+                Assert.True(i >= limit, $"call {i} was refused with room left");
+                busy++;
+            }
+            else Assert.Equal(i % 2 == 0 ? BcryptStatus.Match : BcryptStatus.NoMatch, r);
+        }
+        Assert.Equal(extra, busy);
+        Assert.Equal(extra, q.Refused);
+        Assert.True(await slow);
+        Assert.Equal(0, q.QueueLength);
+    }
+
+    /// <summary>Reading a read result again (ValueTask.Result goes straight to GetResult) throws and must not pool the
+    /// request a second time: two later calls would then share it and could swap answers.</summary>
+    [Fact]
+    public async Task AStaleReadDoesNotPoolTheRequestTwice()
+    {
+        using var q = Queue();
+        var check = q.TryVerifyAsync("password123"u8, Hash4Ascii, Ct);
+        Assert.Equal(BcryptStatus.Match, await check);
+        Assert.Throws<InvalidOperationException>(() => check.Result);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await check);
+        for (int round = 0; round < 20; round++)
+        {
+            // two calls sharing a request would leave one waiting for good: fail after a while instead of hanging
+            var good = q.TryVerifyAsync("password123"u8, Hash4Ascii, Ct).AsTask().WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            var bad = q.TryVerifyAsync("password124"u8, Hash4Ascii, Ct).AsTask().WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            Assert.Equal(BcryptStatus.Match, await good);
+            Assert.Equal(BcryptStatus.NoMatch, await bad);
+        }
+    }
+
+    /// <summary>The stored hash is compared in full, its last character too (as Go's bcrypt does), and its salt counts.</summary>
+    [Fact]
+    public async Task AStoredHashDifferingInOneCharacterDoesNotMatch()
+    {
+        using var q = Queue();
+        byte[] hash = (byte[])Hash4Ascii.Clone();
+        Assert.Equal(BcryptStatus.Match, await q.TryVerifyAsync("password123"u8, hash, Ct));
+        foreach (byte c in "./AZaz09"u8.ToArray())
+        {
+            if (c == Hash4Ascii[^1]) continue;
+            hash[^1] = c;
+            Assert.Equal(BcryptStatus.NoMatch, await q.TryVerifyAsync("password123"u8, hash, Ct));
+        }
+        hash[^1] = Hash4Ascii[^1];
+        hash[20] = hash[20] == (byte)'a' ? (byte)'b' : (byte)'a'; // a salt character
+        Assert.Equal(BcryptStatus.NoMatch, await q.TryVerifyAsync("password123"u8, hash, Ct));
+    }
+
+    /// <summary>A result with no hash has nothing to copy.</summary>
+    [Fact]
+    public async Task ABusyOrCancelledHashHasNothingToCopy()
+    {
+        using var q = Queue();
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var none = await q.TryHashAsync("alpha"u8, 4, cts.Token);
+        Assert.Equal(BcryptStatus.Cancelled, none.Status);
+        Assert.Throws<InvalidOperationException>(() => none.CopyTo(new byte[60]));
+        var made = await q.TryHashAsync("alpha"u8, 4, Ct);
+        Assert.Throws<ArgumentException>(() => made.CopyTo(new byte[59]));
+        var text = new byte[60];
+        made.CopyTo(text);
+        Assert.True(Bcrypt.Verify("alpha"u8, text));
+    }
+
+    /// <summary>
+    /// The batching window runs from the first call's arrival, not from when a worker takes it: a call that waited out
+    /// the window behind a long run runs at once instead of waiting a second window for company.
+    /// </summary>
+    [Fact]
+    public async Task ACallOlderThanTheWindowRunsWithoutWaitingAgain()
+    {
+        var window = TimeSpan.FromMilliseconds(300);
+        using var q = Queue(windowMs: (int)window.TotalMilliseconds);
+        var start = Stopwatch.StartNew();
+        var slow = Enumerable.Range(0, Bcrypt.MaxLanes).Select(_ => q.HashAsync("pw"u8, 13, Ct)).ToArray(); // well over the window
+        var late = q.TryVerifyAsync("password123"u8, Hash4Ascii, Ct);
+        foreach (var s in slow) Assert.Equal(60, (await s).Length);
+        var run = start.Elapsed;
+        Assert.True(run > window + TimeSpan.FromMilliseconds(200), $"the run took only {run}, so the late call wasn't older than the window");
+        Assert.Equal(BcryptStatus.Match, await late);
+        var after = start.Elapsed - run;
+        Assert.True(after < window / 2, $"waited {after} after the run");
+        Assert.Equal(2, q.Batches);
     }
 }

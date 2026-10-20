@@ -214,4 +214,30 @@ public class AllocationTests
         Assert.True(await slow);
         Assert.Equal(BcryptStatus.Match, await queued);
     }
+
+    /// <summary>
+    /// The contest server's measure: 200 logins and 25 sign-ups once warm, through the workers and the pool, allocate
+    /// nothing anywhere in the process. On a pool thread, as a server without a synchronization context runs them.
+    /// </summary>
+    [Fact]
+    public async Task LoginsAndSignUpsAllocateNothing()
+    {
+        using var q = new BcryptQueue(new BcryptQueueOptions { Threads = 1 });
+        byte[] pw = "password123"u8.ToArray(), wrong = "password124"u8.ToArray(), destination = new byte[Bcrypt.HashLength];
+        var (matched, allocated) = await Task.Run(async () =>
+        {
+            int matches = 0;
+            long before = 0;
+            for (int i = 0; i < 250; i++)
+            {
+                if (i == 50) before = GC.GetTotalAllocatedBytes(precise: true); // warmed up
+                if (await q.TryVerifyAsync(i % 2 == 0 ? pw : wrong, Hash4Ascii) == BcryptStatus.Match && i >= 50) matches++;
+                if (i % 8 == 0) (await q.TryHashAsync(pw, 4)).CopyTo(destination);
+            }
+            return (matches, GC.GetTotalAllocatedBytes(precise: true) - before);
+        }, TestContext.Current.CancellationToken);
+        Assert.Equal(100, matched);
+        Assert.Equal(0, allocated);
+        Assert.True(Bcrypt.Verify("password123"u8, destination));
+    }
 }
